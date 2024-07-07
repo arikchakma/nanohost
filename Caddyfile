@@ -1,0 +1,13 @@
+nanohost.localhost {
+  reverse_proxy http://localhost:8080
+}
+
+*.nanohost.localhost {
+  @customHost {
+    host *.nanohost.localhost
+  }
+  handle @customHost {
+    rewrite * /s/{http.request.host}
+    reverse_proxy http://localhost:8080
+  }
+}

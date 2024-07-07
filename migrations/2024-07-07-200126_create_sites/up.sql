@@ -1,0 +1,20 @@
+-- Your SQL goes here
+CREATE TABLE sites (
+  id TEXT PRIMARY KEY NOT NULL,
+  subdomain VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE files (
+    id VARCHAR(255) PRIMARY KEY NOT NULL,
+    site_id VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    path TEXT NOT NULL,
+    mime_type VARCHAR(255) NOT NULL,
+    size BIGINT NOT NULL,
+    is_index BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (site_id) REFERENCES sites(id)
+);

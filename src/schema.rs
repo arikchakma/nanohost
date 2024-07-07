@@ -1,12 +1,31 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    todos (id) {
+    files (id) {
         id -> Text,
-        title -> Text,
-        completed -> Bool,
-        completed_at -> Nullable<Timestamp>,
+        site_id -> Text,
+        name -> Text,
+        path -> Text,
+        mime_type -> Text,
+        size -> BigInt,
+        is_index -> Bool,
         created_at -> Timestamp,
         updated_at -> Timestamp,
     }
 }
+
+diesel::table! {
+    sites (id) {
+        id -> Text,
+        subdomain -> Text,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::joinable!(files -> sites (site_id));
+
+diesel::allow_tables_to_appear_in_same_query!(
+    files,
+    sites,
+);
