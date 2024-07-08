@@ -8,7 +8,8 @@ use serde::Deserialize;
 #[diesel(table_name = sites)]
 pub struct Site {
     pub id: String,
-    pub subdomain: String,
+    pub host: String,
+    pub index_file: Option<String>,
 
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,

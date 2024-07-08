@@ -13,8 +13,14 @@ use tokio_util::io::ReaderStream;
 
 #[derive(MultipartForm)]
 pub struct CreateSiteForm {
-    #[multipart(rename = "subdomain")]
-    subdomain: Text<String>,
+    #[multipart(rename = "domain")]
+    domain: Text<String>,
+    #[multipart(rename = "suffix")]
+    suffix: Text<String>,
+
+    #[multipart(rename = "index_file")]
+    index_file: Text<String>,
+
     #[multipart(rename = "file")]
     files: Vec<TempFile>,
 }
@@ -24,18 +30,24 @@ pub async fn create_site(
     s3_client: web::Data<s3::Client>,
     MultipartForm(form): MultipartForm<CreateSiteForm>,
 ) -> impl Responder {
-    // purpose of using `use crate::schema::files::dsl::*;` and `use crate::schema::sites::dsl::*;
-    // is to avoid writing the full path of the schema in the query
-    // for example, instead of writing `crate::schema::files::dsl::files` we can just write `files`
     use crate::schema::files::dsl::*;
     use crate::schema::sites::dsl::*;
 
     let uploading_files = form.files;
+    println!("Uploading files: {:?}", uploading_files);
     for file in &uploading_files {
-        let content_type = file.content_type.clone().unwrap();
-        if content_type != "text/html" {
+        let content_type = match file.content_type.clone() {
+            Some(content_type) => content_type,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "message": "Invalid file type. Only text/html and text/css files are allowed",
+                }));
+            }
+        };
+
+        if content_type != "text/html" && content_type != "text/css" {
             return HttpResponse::BadRequest().json(json!({
-                "message": "Invalid file type. Only text/html files are allowed",
+                "message": "Invalid file type. Only text/html and text/css files are allowed",
             }));
         }
     }
@@ -43,9 +55,11 @@ pub async fn create_site(
     let mut conn = pool.get().expect("couldn't get db connection from pool");
 
     let now = Utc::now().naive_utc();
+    let formatted_host = format!("{}{}", form.domain.clone(), form.suffix.clone());
     let new_site = Site {
         id: ulid::Ulid::new().to_string(),
-        subdomain: form.subdomain.clone(),
+        host: formatted_host,
+        index_file: Some(form.index_file.clone()),
         created_at: now,
         updated_at: now,
     };
@@ -61,8 +75,6 @@ pub async fn create_site(
         .await
         .expect("Error uploading files");
 
-    println!("Uploaded files: {:?}", uploaded_files);
-
     let new_files: Vec<File> = uploaded_files
         .into_iter()
         .map(|file| {
@@ -73,11 +85,11 @@ pub async fn create_site(
             File {
                 id: ulid::Ulid::new().to_string(),
                 site_id: new_site.id.clone(),
-                name: file_name,
+                name: file_name.clone(),
                 path: file_path,
                 mime_type: file_mime_type,
                 size: file.size,
-                is_index: true,
+                is_index: file_name == form.index_file.clone(),
                 created_at: now,
                 updated_at: now,
             }
@@ -95,7 +107,7 @@ pub async fn create_site(
 }
 
 pub async fn serve_site_file(
-    host: web::Path<String>,
+    site_path: web::Path<String>,
     method: Method,
     pool: web::Data<DbPool>,
     s3_client: web::Data<s3::Client>,
@@ -103,11 +115,22 @@ pub async fn serve_site_file(
     use crate::schema::files::dsl::*;
     use crate::schema::sites::dsl::*;
 
-    let site_host = host.into_inner().replace(".nanohost.localhost", "");
+    let site_path = site_path.into_inner();
+    let path_segments: Vec<&str> = site_path.split('/').collect();
+    let (host_name, formatted_path) = match path_segments.split_first() {
+        Some((host_name, remaining_segments)) => (host_name, remaining_segments.join("/")),
+        None => {
+            return HttpResponse::NotFound().finish();
+        }
+    };
+
+    let is_index_page = formatted_path.clone() == "/" || formatted_path.is_empty();
+
     let mut conn = pool.get().expect("couldn't get db connection from pool");
 
-    let site = match sites
-        .filter(subdomain.eq(site_host))
+    let site: Site = match sites
+        .filter(host.eq(host_name))
+        .select(Site::as_select())
         .first::<Site>(&mut conn)
     {
         Ok(site) => site,
@@ -116,17 +139,33 @@ pub async fn serve_site_file(
         }
     };
 
-    let index_file = match files
-        .filter(site_id.eq(site.id.clone()).and(is_index.eq(true)))
+    let site_path = format!(
+        "sites/{}/{}",
+        site.id,
+        if is_index_page {
+            site.index_file.unwrap_or("index.html".to_string())
+        } else {
+            formatted_path
+        }
+    );
+    println!("Site path: {}", site_path);
+    let associated_file = match files
+        .filter(
+            site_id
+                .eq(site.id.clone())
+                .and(is_index.eq(is_index_page))
+                .and(path.eq(site_path)),
+        )
         .first::<File>(&mut conn)
     {
         Ok(file) => file,
         Err(_) => {
+            println!("File not found");
             return HttpResponse::NotFound().finish();
         }
     };
 
-    let (file_size, file_stream) = match s3_client.fetch_file(&index_file.path).await {
+    let (file_size, file_stream) = match s3_client.fetch_file(&associated_file.path).await {
         Some((file_size, file_stream)) => (file_size, file_stream),
         None => {
             return HttpResponse::InternalServerError().finish();
@@ -134,17 +173,14 @@ pub async fn serve_site_file(
     };
 
     let stream = match method {
-        // data stream for GET requests
         Method::GET => ReaderStream::new(file_stream.into_async_read()).boxed_local(),
-
-        // empty stream for HEAD requests
         Method::HEAD => stream::empty::<Result<_, io::Error>>().boxed_local(),
 
         _ => unreachable!(),
     };
 
     HttpResponse::Ok()
-        .content_type(index_file.mime_type)
+        .content_type(associated_file.mime_type)
         .no_chunking(file_size)
         .body(SizedStream::new(file_size, stream))
 }

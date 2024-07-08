@@ -97,7 +97,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(s3_client.clone()))
             .service(greet)
             .route("/sites", web::post().to(sites::create_site))
-            .route("/s/{host}", web::get().to(sites::serve_site_file))
+            .route("/s/{host:.*}", web::get().to(sites::serve_site_file))
     })
     .bind(address)?
     .workers(2)

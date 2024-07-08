@@ -17,9 +17,10 @@ diesel::table! {
 diesel::table! {
     sites (id) {
         id -> Text,
-        subdomain -> Text,
+        host -> Text,
         created_at -> Timestamp,
         updated_at -> Timestamp,
+        index_file -> Nullable<Text>,
     }
 }
 
