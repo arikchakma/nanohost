@@ -2,3 +2,6 @@
 *.env
 !.env.example
 .temp
+/data/*
+!/data/.gitkeep
+.DS_Store

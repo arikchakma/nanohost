@@ -3,6 +3,7 @@ use std::io;
 use crate::db::DbPool;
 use crate::models::{File, Site};
 use crate::services::s3;
+use crate::utils::zip::extract_file;
 use actix_multipart::form::{tempfile::TempFile, text::Text, MultipartForm};
 use actix_web::{body::SizedStream, http::Method, web, HttpResponse, Responder};
 use chrono::Utc;
@@ -11,18 +12,69 @@ use futures_util::{stream, StreamExt};
 use serde_json::json;
 use tokio_util::io::ReaderStream;
 
+enum SiteType {
+    Html,
+    Zip,
+}
+
 #[derive(MultipartForm)]
 pub struct CreateSiteForm {
-    #[multipart(rename = "domain")]
     domain: Text<String>,
-    #[multipart(rename = "suffix")]
     suffix: Text<String>,
 
-    #[multipart(rename = "index_file")]
+    site_type: Text<String>,
     index_file: Text<String>,
 
     #[multipart(rename = "file")]
     files: Vec<TempFile>,
+}
+
+fn validate_files(site_type: SiteType, files: Vec<TempFile>) -> Result<Vec<TempFile>, String> {
+    match site_type {
+        SiteType::Html => {
+            const MAX_FILE_SIZE: usize = 2 * 1024 * 1024; // 2MB
+
+            for file in &files {
+                let content_type = file.content_type.clone().ok_or_else(|| "")?;
+                if content_type != "text/html" && content_type != "text/css" {
+                    return Err(
+                        "Invalid file type. Only text/html and text/css files are allowed"
+                            .to_string(),
+                    );
+                }
+
+                if file.size > MAX_FILE_SIZE {
+                    return Err("File size is too large. Maximum size is 2MB".to_string());
+                }
+            }
+
+            Ok(files)
+        }
+        SiteType::Zip => {
+            // If the site type is zip, we will take the first file and check if it's a zip file
+            // if it's not a zip file, we will return an error
+            // otherwise extract the files and add them to the updated_files vector
+            let first_file = match files.into_iter().next() {
+                Some(file) => file,
+                None => {
+                    return Err("No files found".to_string());
+                }
+            };
+
+            let content_type = first_file.content_type.clone().ok_or_else(|| "")?;
+            if content_type != "application/zip" {
+                return Err("Invalid file type. Only zip files are allowed".to_string());
+            }
+
+            const MAX_ZIP_FILE_SIZE: usize = 5 * 1024 * 1024; // 5MB
+            if first_file.size > MAX_ZIP_FILE_SIZE {
+                return Err("Zip file size is too large. Maximum size is 5MB".to_string());
+            }
+
+            let files = extract_file(first_file.file.into_file());
+            Ok(files)
+        }
+    }
 }
 
 pub async fn create_site(
@@ -33,29 +85,44 @@ pub async fn create_site(
     use crate::schema::files::dsl::*;
     use crate::schema::sites::dsl::*;
 
-    let uploading_files = form.files;
-    println!("Uploading files: {:?}", uploading_files);
-    for file in &uploading_files {
-        let content_type = match file.content_type.clone() {
-            Some(content_type) => content_type,
-            None => {
-                return HttpResponse::BadRequest().json(json!({
-                    "message": "Invalid file type. Only text/html and text/css files are allowed",
-                }));
-            }
-        };
-
-        if content_type != "text/html" && content_type != "text/css" {
+    let site_type = match form.site_type.clone().as_str() {
+        "html" => SiteType::Html,
+        "zip" => SiteType::Zip,
+        _ => {
             return HttpResponse::BadRequest().json(json!({
-                "message": "Invalid file type. Only text/html and text/css files are allowed",
+                "message": "Invalid site type. Only 'html' and 'zip' are allowed",
             }));
         }
-    }
+    };
+
+    let uploading_files = match validate_files(site_type, form.files) {
+        Ok(updated_files) => updated_files,
+        Err(message) => {
+            return HttpResponse::BadRequest().json(json!({
+                "message": message,
+            }));
+        }
+    };
 
     let mut conn = pool.get().expect("couldn't get db connection from pool");
 
-    let now = Utc::now().naive_utc();
+    // Check if the host is already taken
+    // If it is, return an error
     let formatted_host = format!("{}{}", form.domain.clone(), form.suffix.clone());
+    match sites
+        .filter(host.eq(formatted_host.clone()))
+        .select(Site::as_select())
+        .first(&mut conn)
+    {
+        Ok(_) => {
+            return HttpResponse::BadRequest().json(json!({
+                "message": "Domain is already taken",
+            }));
+        }
+        Err(_) => false,
+    };
+
+    let now = Utc::now().naive_utc();
     let new_site = Site {
         id: ulid::Ulid::new().to_string(),
         host: formatted_host,
@@ -102,7 +169,7 @@ pub async fn create_site(
         .expect("Error saving new files");
 
     HttpResponse::Ok().json(json!({
-        "message": "Site created successfully",
+        "message": format!("You can now access your site at: https://{}", new_site.host)
     }))
 }
 
@@ -124,8 +191,6 @@ pub async fn serve_site_file(
         }
     };
 
-    let is_index_page = formatted_path.clone() == "/" || formatted_path.is_empty();
-
     let mut conn = pool.get().expect("couldn't get db connection from pool");
 
     let site: Site = match sites
@@ -139,22 +204,41 @@ pub async fn serve_site_file(
         }
     };
 
+    let site_index_file = site
+        .index_file
+        .clone()
+        .unwrap_or_else(|| "index.html".to_string());
+    let is_index_page = formatted_path.clone() == "/"
+        || formatted_path.is_empty()
+        || formatted_path.clone() == site_index_file.clone();
+
+    println!("{}", "-".repeat(20));
+    println!("Host name: {}", host_name);
+    println!("Formatted path: {}", formatted_path);
+    println!("Is index page: {}", is_index_page);
     let site_path = format!(
         "sites/{}/{}",
         site.id,
         if is_index_page {
-            site.index_file.unwrap_or("index.html".to_string())
+            site_index_file
         } else {
             formatted_path
         }
     );
+
     println!("Site path: {}", site_path);
+    println!("{}", "-".repeat(20));
+
     let associated_file = match files
         .filter(
             site_id
                 .eq(site.id.clone())
                 .and(is_index.eq(is_index_page))
-                .and(path.eq(site_path)),
+                .and(
+                    path.eq(site_path.clone()).or(path
+                        .eq(format!("{}.html", site_path.clone()))
+                        .or(path.eq(format!("{}/index.html", site_path.clone())))),
+                ),
         )
         .first::<File>(&mut conn)
     {
