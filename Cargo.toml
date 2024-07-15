@@ -10,6 +10,7 @@ actix-cors = "0.7.0"
 actix-multipart = "0.7.2"
 actix-web = "4.8.0"
 aws-config = "1.5.4"
+aws-sdk-cloudfrontkeyvaluestore = "1.35.0"
 aws-sdk-s3 = "1.40.0"
 chrono = { version = "0.4.38", features = ["serde"] }
 diesel = { version = "2.2.1", features = ["sqlite", "r2d2", "chrono"] }

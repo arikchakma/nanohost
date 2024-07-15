@@ -86,6 +86,8 @@ async fn main() -> std::io::Result<()> {
         .await;
 
     let s3_client = s3::Client::new(&aws_config, &config.aws_s3_bucket_name);
+    let cloudfront_kvs_client =
+        services::cloudfront_key_value::Client::new(&aws_config, &config.aws_cloudfront_kvs_arn);
 
     let port = 8080;
     let address = format!("127.0.0.1:{}", port);
@@ -95,9 +97,13 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(s3_client.clone()))
+            .app_data(web::Data::new(cloudfront_kvs_client.clone()))
             .service(greet)
+            .route("/sites", web::get().to(sites::list_sites))
             .route("/sites", web::post().to(sites::create_site))
-            .route("/s/{host:.*}", web::get().to(sites::serve_site_file))
+            .route("/sites/{site_id}", web::get().to(sites::get_site))
+            .route("/sites/{site_id}", web::put().to(sites::update_site))
+            .route("/sites/{site_id}", web::delete().to(sites::delete_site))
     })
     .bind(address)?
     .workers(2)

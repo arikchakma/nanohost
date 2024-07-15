@@ -1,9 +1,9 @@
 use super::schema::{files, sites};
 use chrono::NaiveDateTime;
 use diesel::{sqlite::Sqlite, Identifiable, Insertable, Queryable, Selectable};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Queryable, Insertable, Identifiable, Deserialize, Selectable)]
+#[derive(Queryable, Insertable, Identifiable, Deserialize, Selectable, Serialize)]
 #[diesel(check_for_backend(Sqlite))]
 #[diesel(table_name = sites)]
 pub struct Site {
@@ -15,7 +15,7 @@ pub struct Site {
     pub updated_at: NaiveDateTime,
 }
 
-#[derive(Queryable, Insertable, Identifiable, Deserialize, Selectable)]
+#[derive(Queryable, Insertable, Identifiable, Deserialize, Selectable, Serialize)]
 #[diesel(belongs_to(Site, foreign_key= site_id))]
 #[diesel(check_for_backend(Sqlite))]
 #[diesel(table_name = files)]

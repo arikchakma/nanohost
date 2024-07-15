@@ -404,6 +404,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-cloudfrontkeyvaluestore"
+version = "1.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "879ac2b6d7561538b97961df59c3c7169b9dbff1f1ce2f818a46cfa10715f5f1"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "http 0.2.12",
+ "once_cell",
+ "regex-lite",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -619,9 +642,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-runtime"
-version = "1.6.1"
+version = "1.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df4217d39fe940066174e6238310167bf466bfbebf3be0661e53cacccde6313"
+checksum = "ce87155eba55e11768b8c1afa607f3e864ae82f03caf63258b37455b0ad02537"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-http",
@@ -1770,6 +1793,7 @@ dependencies = [
  "actix-multipart",
  "actix-web",
  "aws-config",
+ "aws-sdk-cloudfrontkeyvaluestore",
  "aws-sdk-s3",
  "chrono",
  "diesel",

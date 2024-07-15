@@ -2,6 +2,7 @@ use std::env;
 
 use actix_multipart::form::tempfile::TempFile;
 use aws_config::SdkConfig as AwsConfig;
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::{primitives::ByteStream, Client as S3Client};
 use futures_util::{stream, StreamExt as _};
 use tokio::{fs, io::AsyncReadExt as _};
@@ -81,12 +82,17 @@ impl Client {
         let file_size = file.size;
 
         let s3_url = self
-            .put_object_from_file(file.file.path().to_str().unwrap(), &key)
+            .put_object_from_file(file.file.path().to_str().unwrap(), &key, &file_content_type)
             .await;
         UploadedFile::new(filename, file_content_type, file_size as i64, key, s3_url)
     }
 
-    async fn put_object_from_file(&self, local_path: &str, key: &str) -> String {
+    async fn put_object_from_file(
+        &self,
+        local_path: &str,
+        key: &str,
+        content_type: &str,
+    ) -> String {
         let mut file = fs::File::open(local_path).await.unwrap();
 
         let size_estimate = file
@@ -105,12 +111,29 @@ impl Client {
             .put_object()
             .bucket(&self.bucket_name)
             .key(key)
+            .content_type(content_type)
             .body(ByteStream::from(contents))
             .send()
             .await
             .expect("Failed to put object");
 
         self.url(key)
+    }
+
+    pub async fn delete_files(&self, keys: Vec<String>) -> bool {
+        let keys = keys
+            .iter()
+            .map(|key| ObjectIdentifier::builder().key(key).build())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Failed to build object identifiers");
+
+        self.s3
+            .delete_objects()
+            .bucket(&self.bucket_name)
+            .delete(Delete::builder().set_objects(Some(keys)).build().unwrap())
+            .send()
+            .await
+            .is_ok()
     }
 
     /// Attempts to deletes object from S3. Returns true if successful.

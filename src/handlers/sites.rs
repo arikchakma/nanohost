@@ -2,9 +2,10 @@ use std::io;
 
 use crate::db::DbPool;
 use crate::models::{File, Site};
-use crate::services::s3;
+use crate::services::{cloudfront_key_value, s3};
 use crate::utils::zip::extract_file;
 use actix_multipart::form::{tempfile::TempFile, text::Text, MultipartForm};
+use actix_web::HttpRequest;
 use actix_web::{body::SizedStream, http::Method, web, HttpResponse, Responder};
 use chrono::Utc;
 use diesel::prelude::*;
@@ -80,6 +81,7 @@ fn validate_files(site_type: SiteType, files: Vec<TempFile>) -> Result<Vec<TempF
 pub async fn create_site(
     pool: web::Data<DbPool>,
     s3_client: web::Data<s3::Client>,
+    cloudfront_key_value_client: web::Data<cloudfront_key_value::Client>,
     MultipartForm(form): MultipartForm<CreateSiteForm>,
 ) -> impl Responder {
     use crate::schema::files::dsl::*;
@@ -125,7 +127,7 @@ pub async fn create_site(
     let now = Utc::now().naive_utc();
     let new_site = Site {
         id: ulid::Ulid::new().to_string(),
-        host: formatted_host,
+        host: formatted_host.clone(),
         index_file: Some(form.index_file.clone()),
         created_at: now,
         updated_at: now,
@@ -168,35 +170,55 @@ pub async fn create_site(
         .execute(&mut conn)
         .expect("Error saving new files");
 
+    let cloudfront_key = formatted_host.clone();
+    let cloudfront_value = format!("{}=x={}", new_site.id.clone(), Utc::now().timestamp());
+
+    cloudfront_key_value_client
+        .set_value(&cloudfront_key, &cloudfront_value)
+        .await
+        .expect("Error setting cloudfront key value");
+
     HttpResponse::Ok().json(json!({
-        "message": format!("You can now access your site at: https://{}", new_site.host)
+        "message": format!("You can now access your site at: https://{} with site id: {}", new_site.host, new_site.id)
     }))
 }
 
-pub async fn serve_site_file(
-    site_path: web::Path<String>,
-    method: Method,
+pub async fn update_site(
+    path_data: web::Path<String>,
     pool: web::Data<DbPool>,
     s3_client: web::Data<s3::Client>,
+    cloudfront_key_value_client: web::Data<cloudfront_key_value::Client>,
+    MultipartForm(form): MultipartForm<CreateSiteForm>,
 ) -> impl Responder {
-    use crate::schema::files::dsl::*;
-    use crate::schema::sites::dsl::*;
+    use crate::schema::files::dsl::{site_id as file_site_id, *};
+    use crate::schema::sites::dsl::{id as site_id, *};
 
-    let site_path = site_path.into_inner();
-    let path_segments: Vec<&str> = site_path.split('/').collect();
-    let (host_name, formatted_path) = match path_segments.split_first() {
-        Some((host_name, remaining_segments)) => (host_name, remaining_segments.join("/")),
-        None => {
-            return HttpResponse::NotFound().finish();
+    let site_type = match form.site_type.clone().as_str() {
+        "html" => SiteType::Html,
+        "zip" => SiteType::Zip,
+        _ => {
+            return HttpResponse::BadRequest().json(json!({
+                "message": "Invalid site type. Only 'html' and 'zip' are allowed",
+            }));
         }
     };
 
+    let uploading_files = match validate_files(site_type, form.files) {
+        Ok(updated_files) => updated_files,
+        Err(message) => {
+            return HttpResponse::BadRequest().json(json!({
+                "message": message,
+            }));
+        }
+    };
+
+    let site_id_to_update = path_data.into_inner();
     let mut conn = pool.get().expect("couldn't get db connection from pool");
 
     let site: Site = match sites
-        .filter(host.eq(host_name))
+        .filter(site_id.eq(site_id_to_update.clone()))
         .select(Site::as_select())
-        .first::<Site>(&mut conn)
+        .first(&mut conn)
     {
         Ok(site) => site,
         Err(_) => {
@@ -204,67 +226,154 @@ pub async fn serve_site_file(
         }
     };
 
-    let site_index_file = site
-        .index_file
-        .clone()
-        .unwrap_or_else(|| "index.html".to_string());
-    let is_index_page = formatted_path.clone() == "/"
-        || formatted_path.is_empty()
-        || formatted_path.clone() == site_index_file.clone();
+    let site_path = format!("sites/{}/", site.id.clone());
+    let uploaded_files = &s3_client
+        .upload_files(uploading_files, &site_path)
+        .await
+        .expect("Error uploading files");
 
-    println!("{}", "-".repeat(20));
-    println!("Host name: {}", host_name);
-    println!("Formatted path: {}", formatted_path);
-    println!("Is index page: {}", is_index_page);
-    let site_path = format!(
-        "sites/{}/{}",
-        site.id,
-        if is_index_page {
-            site_index_file
-        } else {
-            formatted_path
-        }
-    );
+    diesel::delete(files.filter(file_site_id.eq(site.id.clone())))
+        .execute(&mut conn)
+        .expect("Error deleting old files");
 
-    println!("Site path: {}", site_path);
-    println!("{}", "-".repeat(20));
+    let new_files: Vec<File> = uploaded_files
+        .into_iter()
+        .map(|file| {
+            let now = Utc::now().naive_utc();
+            let file_name = file.filename.clone();
+            let file_path = format!("{}{}", site_path, file_name);
+            let file_mime_type = file.content_type.clone();
+            File {
+                id: ulid::Ulid::new().to_string(),
+                site_id: site.id.clone(),
+                name: file_name.clone(),
+                path: file_path,
+                mime_type: file_mime_type,
+                size: file.size,
+                is_index: file_name == form.index_file.clone(),
+                created_at: now,
+                updated_at: now,
+            }
+        })
+        .collect();
 
-    let associated_file = match files
-        .filter(
-            site_id
-                .eq(site.id.clone())
-                .and(is_index.eq(is_index_page))
-                .and(
-                    path.eq(site_path.clone()).or(path
-                        .eq(format!("{}.html", site_path.clone()))
-                        .or(path.eq(format!("{}/index.html", site_path.clone())))),
-                ),
-        )
-        .first::<File>(&mut conn)
+    diesel::insert_into(files)
+        .values(&new_files)
+        .execute(&mut conn)
+        .expect("Error saving new files");
+
+    let cloudfront_key = site.host.clone();
+    let cloudfront_value = format!("{}=x={}", site.id.clone(), Utc::now().timestamp());
+
+    cloudfront_key_value_client
+        .set_value(&cloudfront_key, &cloudfront_value)
+        .await
+        .expect("Error setting cloudfront key value");
+
+    HttpResponse::Ok().json(json!({
+        "message": format!("Site updated successfully")
+    }))
+}
+
+pub async fn delete_site(
+    path_data: web::Path<String>,
+    pool: web::Data<DbPool>,
+    s3_client: web::Data<s3::Client>,
+    cloudfront_key_value_client: web::Data<cloudfront_key_value::Client>,
+) -> impl Responder {
+    use crate::schema::files::dsl::{site_id as file_site_id, *};
+    use crate::schema::sites::dsl::{id as site_id, *};
+
+    let site_id_to_delete = path_data.into_inner();
+    let mut conn = pool.get().expect("couldn't get db connection from pool");
+
+    let site: Site = match sites
+        .filter(site_id.eq(site_id_to_delete.clone()))
+        .select(Site::as_select())
+        .first(&mut conn)
     {
-        Ok(file) => file,
+        Ok(site) => site,
         Err(_) => {
-            println!("File not found");
             return HttpResponse::NotFound().finish();
         }
     };
 
-    let (file_size, file_stream) = match s3_client.fetch_file(&associated_file.path).await {
-        Some((file_size, file_stream)) => (file_size, file_stream),
-        None => {
+    let file_paths: Vec<String> = files
+        .filter(file_site_id.eq(site.id.clone()))
+        .select(path)
+        .load::<String>(&mut conn)
+        .expect("Error loading files");
+
+    match s3_client.delete_files(file_paths).await {
+        true => (),
+        false => {
             return HttpResponse::InternalServerError().finish();
+        }
+    }
+
+    cloudfront_key_value_client
+        .delete_value(&site.host)
+        .await
+        .expect("Error deleting cloudfront key value");
+
+    diesel::delete(files.filter(file_site_id.eq(site.id.clone())))
+        .execute(&mut conn)
+        .expect("Error deleting files");
+
+    diesel::delete(sites.filter(site_id.eq(site.id.clone())))
+        .execute(&mut conn)
+        .expect("Error deleting site");
+
+    HttpResponse::Ok().json(json!({
+        "message": format!("Site deleted successfully")
+    }))
+}
+
+pub async fn list_sites(pool: web::Data<DbPool>) -> impl Responder {
+    use crate::schema::sites::dsl::*;
+
+    let mut conn = pool.get().expect("couldn't get db connection from pool");
+
+    let sites_list: Vec<Site> = sites
+        .select(Site::as_select())
+        .load::<Site>(&mut conn)
+        .expect("Error loading sites");
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "sites": sites_list,
+        "total": sites_list.len(),
+    }))
+}
+
+pub async fn get_site(path_data: web::Path<String>, pool: web::Data<DbPool>) -> impl Responder {
+    use crate::schema::files::dsl::{files, site_id as file_site_id};
+    use crate::schema::sites::dsl::*;
+
+    let site_id = path_data.into_inner();
+    println!("Site id: {}", site_id);
+    let mut conn = pool.get().expect("couldn't get db connection from pool");
+
+    let site: Site = match sites
+        .filter(id.eq(site_id.clone()))
+        .select(Site::as_select())
+        .first(&mut conn)
+    {
+        Ok(site) => site,
+        Err(err) => {
+            println!("{:?}", err);
+            return HttpResponse::NotFound().finish();
         }
     };
 
-    let stream = match method {
-        Method::GET => ReaderStream::new(file_stream.into_async_read()).boxed_local(),
-        Method::HEAD => stream::empty::<Result<_, io::Error>>().boxed_local(),
+    let files_list: Vec<File> = files
+        .filter(file_site_id.eq(site_id.clone()))
+        .select(File::as_select())
+        .load::<File>(&mut conn)
+        .expect("Error loading files");
 
-        _ => unreachable!(),
-    };
-
-    HttpResponse::Ok()
-        .content_type(associated_file.mime_type)
-        .no_chunking(file_size)
-        .body(SizedStream::new(file_size, stream))
+    HttpResponse::Ok().json(serde_json::json!({
+        "site": site,
+        "files": files_list,
+        "total_files": files_list.len(),
+    }))
 }

@@ -15,6 +15,8 @@ pub struct Config {
     pub aws_secret_access_key: String,
 
     pub aws_s3_bucket_name: String,
+
+    pub aws_cloudfront_kvs_arn: String,
 }
 
 // TODO: potentially replace this with arctix settings later
@@ -34,6 +36,7 @@ impl Config {
             aws_secret_access_key: Self::get_env("AWS_SECRET_ACCESS_KEY", ""),
 
             aws_s3_bucket_name: Self::get_env("AWS_S3_BUCKET_NAME", ""),
+            aws_cloudfront_kvs_arn: Self::get_env("AWS_CLOUDFRONT_KVS_ARN", ""),
         }
     }
 
