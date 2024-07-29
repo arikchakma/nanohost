@@ -23,7 +23,7 @@ impl Client {
             input = input.item(key, value);
         }
 
-        let response = input.send().await.expect("Failed to put item");
+        let _response = input.send().await.expect("Failed to put item");
 
         Ok(())
     }
