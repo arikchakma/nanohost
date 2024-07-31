@@ -88,7 +88,7 @@ async fn main() -> std::io::Result<()> {
     let s3_client = s3::Client::new(&aws_config, &config.aws_s3_bucket_name);
     let cloudfront_kvs_client =
         cloudfront_key_value::Client::new(&aws_config, &config.aws_cloudfront_kvs_arn);
-    let dynamodb_client = dynamodb::Client::new(&aws_config, "sites");
+    let dynamodb_client = dynamodb::Client::new(&aws_config, &config.aws_dynamodb_table_name);
 
     let port = 8080;
     let address = format!("127.0.0.1:{}", port);

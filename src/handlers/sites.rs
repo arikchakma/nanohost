@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use crate::db::DbPool;
 use crate::models::{File, Site};
-use crate::services::{cloudfront_key_value, s3};
+use crate::services::{dynamodb, s3};
 use crate::utils::zip::extract_file;
 use actix_multipart::form::{tempfile::TempFile, text::Text, MultipartForm};
 use actix_web::{web, HttpResponse, Responder};
+use aws_sdk_dynamodb::types::AttributeValue;
 use chrono::Utc;
 use diesel::prelude::*;
 use serde_json::json;
@@ -76,8 +79,7 @@ fn validate_files(site_type: SiteType, files: Vec<TempFile>) -> Result<Vec<TempF
 pub async fn create_site(
     pool: web::Data<DbPool>,
     s3_client: web::Data<s3::Client>,
-    cloudfront_key_value_client: web::Data<cloudfront_key_value::Client>,
-    // dynamodb_client: web::Data<dynamodb::Client>,
+    dynamodb_client: web::Data<dynamodb::Client>,
     MultipartForm(form): MultipartForm<CreateSiteForm>,
 ) -> impl Responder {
     use crate::schema::files::dsl::*;
@@ -166,36 +168,29 @@ pub async fn create_site(
         .execute(&mut conn)
         .expect("Error saving new files");
 
-    let cloudfront_key = formatted_host.clone();
-    let cloudfront_value = format!("{}=x={}", new_site.id.clone(), Utc::now().timestamp());
-    // let mut dynamodb_values: HashMap<String, AttributeValue> = HashMap::new();
-    // dynamodb_values.insert(
-    //     "host".to_string(),
-    //     AttributeValue::S(formatted_host.clone()),
-    // );
-    // dynamodb_values.insert("siteId".to_string(), AttributeValue::S(new_site.id.clone()));
-    // dynamodb_values.insert(
-    //     "cacheKey".to_string(),
-    //     AttributeValue::S(format!(
-    //         "{}=x={}",
-    //         new_site.id.clone(),
-    //         Utc::now().timestamp()
-    //     )),
-    // );
-    // dynamodb_values.insert(
-    //     "timestamp".to_string(),
-    //     AttributeValue::N(Utc::now().timestamp().to_string()),
-    // );
+    let mut dynamodb_values: HashMap<String, AttributeValue> = HashMap::new();
+    dynamodb_values.insert(
+        "host".to_string(),
+        AttributeValue::S(formatted_host.clone()),
+    );
+    dynamodb_values.insert("siteId".to_string(), AttributeValue::S(new_site.id.clone()));
+    dynamodb_values.insert(
+        "cacheKey".to_string(),
+        AttributeValue::S(format!(
+            "{}=x={}",
+            new_site.id.clone(),
+            Utc::now().timestamp()
+        )),
+    );
+    dynamodb_values.insert(
+        "timestamp".to_string(),
+        AttributeValue::N(Utc::now().timestamp().to_string()),
+    );
 
-    // dynamodb_client
-    //     .put_item(dynamodb_values)
-    //     .await
-    //     .expect("Error putting item");
-
-    cloudfront_key_value_client
-        .set_value(&cloudfront_key, &cloudfront_value)
+    dynamodb_client
+        .put_item(dynamodb_values)
         .await
-        .expect("Error setting cloudfront key value");
+        .expect("Error putting item");
 
     HttpResponse::Ok().json(json!({
         "message": format!("You can now access your site at: https://{} with site id: {}", new_site.host, new_site.id)
@@ -206,7 +201,7 @@ pub async fn update_site(
     path_data: web::Path<String>,
     pool: web::Data<DbPool>,
     s3_client: web::Data<s3::Client>,
-    cloudfront_key_value_client: web::Data<cloudfront_key_value::Client>,
+    dynamodb_client: web::Data<dynamodb::Client>,
     MultipartForm(form): MultipartForm<CreateSiteForm>,
 ) -> impl Responder {
     use crate::schema::files::dsl::{site_id as file_site_id, *};
@@ -281,13 +276,22 @@ pub async fn update_site(
         .execute(&mut conn)
         .expect("Error saving new files");
 
-    let cloudfront_key = site.host.clone();
-    let cloudfront_value = format!("{}=x={}", site.id.clone(), Utc::now().timestamp());
+    let mut dynamodb_values: HashMap<String, AttributeValue> = HashMap::new();
+    dynamodb_values.insert("host".to_string(), AttributeValue::S(site.host.clone()));
+    dynamodb_values.insert("siteId".to_string(), AttributeValue::S(site.id.clone()));
+    dynamodb_values.insert(
+        "cacheKey".to_string(),
+        AttributeValue::S(format!("{}=x={}", site.id.clone(), Utc::now().timestamp())),
+    );
+    dynamodb_values.insert(
+        "timestamp".to_string(),
+        AttributeValue::N(Utc::now().timestamp().to_string()),
+    );
 
-    cloudfront_key_value_client
-        .set_value(&cloudfront_key, &cloudfront_value)
+    dynamodb_client
+        .put_item(dynamodb_values)
         .await
-        .expect("Error setting cloudfront key value");
+        .expect("Error putting item");
 
     HttpResponse::Ok().json(json!({
         "message": format!("Site updated successfully")
@@ -298,7 +302,7 @@ pub async fn delete_site(
     path_data: web::Path<String>,
     pool: web::Data<DbPool>,
     s3_client: web::Data<s3::Client>,
-    cloudfront_key_value_client: web::Data<cloudfront_key_value::Client>,
+    dynamodb_client: web::Data<dynamodb::Client>,
 ) -> impl Responder {
     use crate::schema::files::dsl::{site_id as file_site_id, *};
     use crate::schema::sites::dsl::{id as site_id, *};
@@ -330,10 +334,13 @@ pub async fn delete_site(
         }
     }
 
-    cloudfront_key_value_client
-        .delete_value(&site.host)
+    let mut dynamodb_values: HashMap<String, AttributeValue> = HashMap::new();
+    dynamodb_values.insert("host".to_string(), AttributeValue::S(site.host.clone()));
+
+    dynamodb_client
+        .delete_item(dynamodb_values)
         .await
-        .expect("Error deleting cloudfront key value");
+        .expect("Error deleting item");
 
     diesel::delete(files.filter(file_site_id.eq(site.id.clone())))
         .execute(&mut conn)

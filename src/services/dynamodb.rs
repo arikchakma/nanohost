@@ -27,4 +27,18 @@ impl Client {
 
         Ok(())
     }
+
+    pub async fn delete_item(&self, key: HashMap<String, AttributeValue>) -> Result<(), ()> {
+        let mut input = self
+            .dynamodb
+            .delete_item()
+            .table_name(self.table_name.clone());
+        for (key, value) in key {
+            input = input.key(key, value);
+        }
+
+        let _response = input.send().await.expect("Failed to delete item");
+
+        Ok(())
+    }
 }
